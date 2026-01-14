@@ -117,10 +117,10 @@ def get_db_connection() -> Tuple[bool, Union[pymysql.connections.Connection, dic
     """
     # 检查数据库配置是否完整 (Requirements 2.1, 2.2)
     required_vars = {
-        "DB_HOST": DB_HOST,
-        "DB_USER": DB_USER,
-        "DB_PASSWORD": DB_PASSWORD,
-        "DB_NAME": DB_NAME
+        "DB_HOST": localhost,
+        "DB_USER": root,
+        "DB_PASSWORD": 825316,
+        "DB_NAME": mini_ecommerce
     }
     
     missing_vars = [name for name, value in required_vars.items() if not value]
@@ -157,3 +157,98 @@ def get_db_connection() -> Tuple[bool, Union[pymysql.connections.Connection, dic
             "error": "ConnectionError",
             "message": f"数据库连接异常: {str(e)}"
         }
+
+
+def is_select_query(sql: str) -> bool:
+    """
+    判断 SQL 语句是否为 SELECT 查询
+    
+    Args:
+        sql: SQL 语句
+        
+    Returns:
+        bool: True 如果是 SELECT 查询，否则 False
+    """
+    sql_upper = sql.strip().upper()
+    return sql_upper.startswith("SELECT")
+
+
+@app.get("/")
+async def health_check():
+    """
+    健康检查端点
+    Requirements: 4.2
+    """
+    return {
+        "success": True,
+        "message": "Coze Database Middleware is running",
+        "version": "1.0.0"
+    }
+
+
+@app.post("/query")
+async def execute_query(request: QueryRequest):
+    """
+    执行 SQL 查询端点
+    
+    接收 POST 请求和 SQL 语句，判断 SQL 类型，执行查询并返回结果
+    
+    Requirements: 1.1, 1.2, 1.3, 1.4, 3.1, 3.2, 3.3, 3.4, 3.5
+    """
+    start_time = time.time()
+    
+    # 验证 SQL 语句是否存在 (Requirements 1.2)
+    if not request.sql or not request.sql.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "success": False,
+                "error": "ValidationError",
+                "message": "SQL 语句缺失或为空"
+            }
+        )
+    
+    # 获取数据库连接
+    success, result = get_db_connection()
+    if not success:
+        raise HTTPException(status_code=500, detail=result)
+    
+    connection = result
+    
+    try:
+        with connection.cursor() as cursor:
+            # 执行 SQL 语句 (Requirements 1.1)
+            cursor.execute(request.sql)
+            
+            # 判断 SQL 类型并处理结果
+            if is_select_query(request.sql):
+                # SELECT 查询 - 返回结果集 (Requirements 1.4, 3.1)
+                data = cursor.fetchall()
+                connection.commit()
+                
+                execution_time = time.time() - start_time
+                
+                return {
+                    "success": True,
+                    "data": data,
+                    "message": "查询成功",
+                    "rows_affected": len(data),
+                    "execution_time": execution_time
+                }
+            else:
+                # INSERT/UPDATE/DELETE - 返回影响行数 (Requirements 3.2, 3.3, 3.4)
+                rows_affected = cursor.rowcount
+                connection.commit()
+                
+                execution_time = time.time() - start_time
+                
+                return {
+                    "success": True,
+                    "data": None,
+                    "message": "操作成功",
+                    "rows_affected": rows_affected,
+                    "execution_time": execution_time
+                }
+                
+    except pymysql.err.ProgrammingError as e:
+      
