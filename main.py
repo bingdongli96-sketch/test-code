@@ -99,7 +99,7 @@ async def verify_api_key(request: Request, call_next):
         return await call_next(request)
     
     # 检查 X-API-Key 请求头 (Requirements 7.1)
-    api_key = request.headers.get("X-API-Key")
+    api_key = request.headers.get("API_Key")
     
     # API Key 缺失返回 401 (Requirements 7.2)
     if not api_key:
