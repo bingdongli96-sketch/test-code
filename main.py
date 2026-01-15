@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import pymysql
-from pymysql.cursors import DictCursor
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # 配置日志记录 (Requirements 6.1, 6.2, 6.3)
 logging.basicConfig(
@@ -26,11 +26,11 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # 环境变量读取
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
+DB_HOST = os.getenv("DB_HOST", "36.138.184.180")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_USER = os.getenv("DB_USER", "libd")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "Libd@123")
+DB_NAME = os.getenv("DB_NAME", "test")
 API_KEY = os.getenv("API_KEY")
 
 # 初始化 FastAPI 应用
@@ -147,7 +147,7 @@ class ErrorResponse(BaseModel):
     message: str
 
 
-def get_db_connection() -> Tuple[bool, Union[pymysql.connections.Connection, dict]]:
+def get_db_connection() -> Tuple[bool, Union[psycopg2.extensions.connection, dict]]:
     """
     创建数据库连接
     
@@ -158,27 +158,25 @@ def get_db_connection() -> Tuple[bool, Union[pymysql.connections.Connection, dic
     
     Requirements: 2.1, 2.2, 2.3, 2.4
     """
-    # 数据库配置 - 直接使用硬编码值
-    db_host = DB_HOST or "localhost"
-    db_port = int(DB_PORT) if DB_PORT else 3306
-    db_user = DB_USER or "root"
-    db_password = DB_PASSWORD or "825316"
-    db_name = DB_NAME or "mini_ecommerce"
+    # 数据库配置
+    db_host = DB_HOST or "36.138.184.180"
+    db_port = int(DB_PORT) if DB_PORT else 5432
+    db_user = DB_USER or "libd"
+    db_password = DB_PASSWORD or "Libd@123"
+    db_name = DB_NAME or "test"
     
     # 尝试连接数据库 (Requirements 2.3, 2.4)
     try:
-        connection = pymysql.connect(
+        connection = psycopg2.connect(
             host=db_host,
             port=db_port,
             user=db_user,
             password=db_password,
             database=db_name,
-            charset='utf8mb4',
-            cursorclass=DictCursor,
             connect_timeout=10
         )
         return True, connection
-    except pymysql.err.OperationalError as e:
+    except psycopg2.OperationalError as e:
         return False, {
             "success": False,
             "error": "ConnectionError",
@@ -367,7 +365,7 @@ async def execute_query(request: QueryRequest):
     connection = result
     
     try:
-        with connection.cursor() as cursor:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
             # 执行 SQL 语句 (Requirements 1.1)
             cursor.execute(request.sql)
             
@@ -377,6 +375,8 @@ async def execute_query(request: QueryRequest):
             if is_select_query(request.sql):
                 # SELECT 查询 - 返回结果集 (Requirements 1.4, 3.1)
                 data = cursor.fetchall()
+                # 将 RealDictRow 转换为普通字典
+                data = [dict(row) for row in data]
                 connection.commit()
                 
                 # 使用格式化函数构建响应 (Requirements 5.1, 5.3, 5.4)
@@ -399,18 +399,21 @@ async def execute_query(request: QueryRequest):
                     execution_time=execution_time
                 )
                 
-    except pymysql.err.ProgrammingError as e:
+    except psycopg2.errors.SyntaxError as e:
         # SQL 语法错误 (Requirements 3.5)
+        connection.rollback()
         raise HTTPException(
             status_code=400,
             detail=build_error_response("SQLError", f"SQL 执行失败: {str(e)}")
         )
-    except pymysql.err.OperationalError as e:
+    except psycopg2.OperationalError as e:
+        connection.rollback()
         raise HTTPException(
             status_code=400,
             detail=build_error_response("SQLError", f"SQL 执行失败: {str(e)}")
         )
     except Exception as e:
+        connection.rollback()
         raise HTTPException(
             status_code=500,
             detail=build_error_response("InternalError", f"内部错误: {str(e)}")
