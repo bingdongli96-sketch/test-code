@@ -4,6 +4,7 @@ Coze Database Middleware
 """
 import os
 import time
+import logging
 from typing import Optional, Tuple, Union
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,14 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import pymysql
 from pymysql.cursors import DictCursor
+
+# 配置日志记录 (Requirements 6.1, 6.2, 6.3)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # 加载环境变量
 load_dotenv()
@@ -39,6 +48,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 请求日志记录中间件 (Requirements 6.1, 6.2, 6.3)
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """
+    请求日志记录中间件
+    - 记录请求时间和请求路径 (Requirements 6.1)
+    - 记录执行耗时 (Requirements 6.2)
+    - 记录错误详情 (Requirements 6.3)
+    """
+    import datetime
+    
+    # 记录请求开始时间
+    start_time = time.time()
+    request_time = datetime.datetime.now().isoformat()
+    
+    # 记录请求信息 (Requirements 6.1)
+    logger.info(f"请求开始 - 时间: {request_time}, 路径: {request.url.path}, 方法: {request.method}")
+    
+    try:
+        # 处理请求
+        response = await call_next(request)
+        
+        # 计算执行耗时 (Requirements 6.2)
+        execution_time = time.time() - start_time
+        logger.info(f"请求完成 - 路径: {request.url.path}, 状态码: {response.status_code}, 耗时: {execution_time:.4f}秒")
+        
+        return response
+    except Exception as e:
+        # 记录错误详情 (Requirements 6.3)
+        execution_time = time.time() - start_time
+        logger.error(f"请求错误 - 路径: {request.url.path}, 错误: {str(e)}, 耗时: {execution_time:.4f}秒")
+        raise
 
 
 # API Key 验证中间件
@@ -115,31 +158,21 @@ def get_db_connection() -> Tuple[bool, Union[pymysql.connections.Connection, dic
     
     Requirements: 2.1, 2.2, 2.3, 2.4
     """
-    # 检查数据库配置是否完整 (Requirements 2.1, 2.2)
-    required_vars = {
-        "DB_HOST": localhost,
-        "DB_USER": root,
-        "DB_PASSWORD": 825316,
-        "DB_NAME": mini_ecommerce
-    }
-    
-    missing_vars = [name for name, value in required_vars.items() if not value]
-    
-    if missing_vars:
-        return False, {
-            "success": False,
-            "error": "ConfigurationError",
-            "message": f"数据库配置缺失: {', '.join(missing_vars)}"
-        }
+    # 数据库配置 - 直接使用硬编码值
+    db_host = DB_HOST or "localhost"
+    db_port = int(DB_PORT) if DB_PORT else 3306
+    db_user = DB_USER or "root"
+    db_password = DB_PASSWORD or "825316"
+    db_name = DB_NAME or "mini_ecommerce"
     
     # 尝试连接数据库 (Requirements 2.3, 2.4)
     try:
         connection = pymysql.connect(
-            host=DB_HOST,
-            port=int(DB_PORT),
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
+            host=db_host,
+            port=db_port,
+            user=db_user,
+            password=db_password,
+            database=db_name,
             charset='utf8mb4',
             cursorclass=DictCursor,
             connect_timeout=10
@@ -173,16 +206,138 @@ def is_select_query(sql: str) -> bool:
     return sql_upper.startswith("SELECT")
 
 
+def serialize_value(value):
+    """
+    将数据库值转换为 JSON 可序列化的格式
+    
+    处理特殊类型：
+    - datetime -> ISO 格式字符串
+    - date -> ISO 格式字符串
+    - time -> 字符串格式
+    - timedelta -> 总秒数字符串
+    - Decimal -> float
+    - bytes -> base64 编码字符串
+    
+    Args:
+        value: 数据库返回的值
+        
+    Returns:
+        JSON 可序列化的值
+        
+    Requirements: 5.3, 5.4
+    """
+    import datetime
+    from decimal import Decimal
+    import base64
+    
+    if value is None:
+        return None
+    elif isinstance(value, datetime.datetime):
+        return value.isoformat()
+    elif isinstance(value, datetime.date):
+        return value.isoformat()
+    elif isinstance(value, datetime.time):
+        return value.isoformat()
+    elif isinstance(value, datetime.timedelta):
+        return str(value)
+    elif isinstance(value, Decimal):
+        return float(value)
+    elif isinstance(value, bytes):
+        return base64.b64encode(value).decode('utf-8')
+    else:
+        return value
+
+
+def format_row(row: dict) -> dict:
+    """
+    格式化单行数据，将所有值转换为 JSON 可序列化格式
+    
+    Args:
+        row: 数据库返回的行数据（字典格式）
+        
+    Returns:
+        格式化后的行数据
+        
+    Requirements: 5.3, 5.4
+    """
+    return {key: serialize_value(value) for key, value in row.items()}
+
+
+def format_response_data(data: list) -> list:
+    """
+    格式化查询结果数据，确保所有数据可被 JSON 序列化
+    
+    Args:
+        data: 数据库查询结果列表
+        
+    Returns:
+        格式化后的数据列表
+        
+    Requirements: 5.3, 5.4
+    """
+    if not data:
+        return []
+    return [format_row(row) for row in data]
+
+
+def build_success_response(data: Optional[list], message: str, rows_affected: int, execution_time: float) -> dict:
+    """
+    构建标准成功响应结构
+    
+    Args:
+        data: 查询结果数据
+        message: 响应消息
+        rows_affected: 影响的行数
+        execution_time: 执行耗时（秒）
+        
+    Returns:
+        标准 JSON 响应结构
+        
+    Requirements: 5.1
+    """
+    return {
+        "success": True,
+        "data": format_response_data(data) if data else None,
+        "message": message,
+        "rows_affected": rows_affected,
+        "execution_time": round(execution_time, 6)
+    }
+
+
+def build_error_response(error_type: str, message: str) -> dict:
+    """
+    构建标准错误响应结构
+    
+    Args:
+        error_type: 错误类型
+        message: 错误详情
+        
+    Returns:
+        标准错误响应结构
+        
+    Requirements: 5.2
+    """
+    return {
+        "success": False,
+        "error": error_type,
+        "message": message
+    }
+
+
 @app.get("/")
 async def health_check():
     """
     健康检查端点
+    返回服务状态信息
     Requirements: 4.2
     """
+    import datetime
     return {
         "success": True,
         "message": "Coze Database Middleware is running",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "status": "healthy",
+        "timestamp": datetime.datetime.now().isoformat()
     }
 
 
@@ -201,11 +356,7 @@ async def execute_query(request: QueryRequest):
     if not request.sql or not request.sql.strip():
         raise HTTPException(
             status_code=400,
-            detail={
-                "success": False,
-                "error": "ValidationError",
-                "message": "SQL 语句缺失或为空"
-            }
+            detail=build_error_response("ValidationError", "SQL 语句缺失或为空")
         )
     
     # 获取数据库连接
@@ -220,35 +371,49 @@ async def execute_query(request: QueryRequest):
             # 执行 SQL 语句 (Requirements 1.1)
             cursor.execute(request.sql)
             
+            execution_time = time.time() - start_time
+            
             # 判断 SQL 类型并处理结果
             if is_select_query(request.sql):
                 # SELECT 查询 - 返回结果集 (Requirements 1.4, 3.1)
                 data = cursor.fetchall()
                 connection.commit()
                 
-                execution_time = time.time() - start_time
-                
-                return {
-                    "success": True,
-                    "data": data,
-                    "message": "查询成功",
-                    "rows_affected": len(data),
-                    "execution_time": execution_time
-                }
+                # 使用格式化函数构建响应 (Requirements 5.1, 5.3, 5.4)
+                return build_success_response(
+                    data=data,
+                    message="查询成功",
+                    rows_affected=len(data),
+                    execution_time=execution_time
+                )
             else:
                 # INSERT/UPDATE/DELETE - 返回影响行数 (Requirements 3.2, 3.3, 3.4)
                 rows_affected = cursor.rowcount
                 connection.commit()
                 
-                execution_time = time.time() - start_time
-                
-                return {
-                    "success": True,
-                    "data": None,
-                    "message": "操作成功",
-                    "rows_affected": rows_affected,
-                    "execution_time": execution_time
-                }
+                # 使用格式化函数构建响应 (Requirements 5.1)
+                return build_success_response(
+                    data=None,
+                    message="操作成功",
+                    rows_affected=rows_affected,
+                    execution_time=execution_time
+                )
                 
     except pymysql.err.ProgrammingError as e:
-      
+        # SQL 语法错误 (Requirements 3.5)
+        raise HTTPException(
+            status_code=400,
+            detail=build_error_response("SQLError", f"SQL 执行失败: {str(e)}")
+        )
+    except pymysql.err.OperationalError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=build_error_response("SQLError", f"SQL 执行失败: {str(e)}")
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=build_error_response("InternalError", f"内部错误: {str(e)}")
+        )
+    finally:
+        connection.close()
